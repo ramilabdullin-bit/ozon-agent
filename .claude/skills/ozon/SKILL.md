@@ -1,6 +1,6 @@
 ---
 name: ozon
-description: Entry point for the Ozon seller-cabinet agent (/root/ozon-agent). Use when asked about Ozon campaigns, card SEO, or "как там озон" for this cabinet. Currently covers one block (ozon-search: ads + SEO analytics/recommendations) — other blocks (sales/margin, reviews, price/RRP monitoring, media content) are planned but not built yet, same roadmap as wb-agent (currently paused).
+description: Entry point for the Ozon seller-cabinet agent (/root/ozon-agent). Use when asked about Ozon campaigns, card SEO, or "как там озон" for this cabinet. Currently covers one block (ozon-search: ads + SEO analytics/recommendations) — other blocks (sales/margin, reviews, price/RRP monitoring, stock/fulfillment, media content) are planned but not built yet, same roadmap as wb-agent (currently paused).
 ---
 
 # ozon — Ozon cabinet agent entry point
@@ -14,9 +14,9 @@ flow, confirmed CSV quirks, and which endpoints are unverified.
 
 - Ads/SEO analytics, campaign recommendations, card text → delegate to the
   `ozon-search` subagent (`.claude/agents/ozon-search.md`).
-- Other planned blocks (продажи/маржа, отзывы, РРЦ, медиа-контент) → not
-  implemented yet, same as the WB side of this roadmap. Say so rather than
-  improvising.
+- Other planned blocks (продажи/маржа, отзывы, РРЦ, остатки/поставки,
+  медиа-контент) → not implemented yet, same as the WB side of this
+  roadmap. Say so rather than improvising.
 
 ## Ground rules
 

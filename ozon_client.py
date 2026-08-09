@@ -255,6 +255,32 @@ class OzonClient:
             result.update(self.fetch_campaign_stats(batch, date_from, date_to))
         return result
 
+    def fetch_campaign_products(self, campaign_id: int) -> list:
+        """GET /api/client/campaign/{id}/v2/products -- confirmed live
+        2026-08-09 (campaign 24098195). Returns our SKUs with current CPC
+        bid in rubles (API unit is millionths of a ruble, same convention
+        as budget -- converted here)."""
+        resp = self._request(
+            self._perf_headers(), "GET", PERF_BASE, f"/api/client/campaign/{campaign_id}/v2/products"
+        )
+        return [
+            {"sku": p["sku"], "title": p["title"], "bid_rub": int(p["bid"]) / 1_000_000}
+            for p in resp.json().get("products", [])
+        ]
+
+    def fetch_competitive_bids(self, campaign_id: int, skus: list) -> dict:
+        """GET /api/client/campaign/{id}/products/bids/competitive --
+        confirmed live 2026-08-09. Ozon's own signal of the CPC bid needed
+        to compete for placement on each SKU right now. Max 200 SKUs/call
+        per the spec (github.com/PCDCK/ozon-mcp perf_swagger.json) --
+        untested above that. bid 0 means the SKU isn't in the campaign."""
+        resp = self._request(
+            self._perf_headers(), "GET", PERF_BASE,
+            f"/api/client/campaign/{campaign_id}/products/bids/competitive",
+            params=[("skus", s) for s in skus],
+        )
+        return {b["sku"]: int(b["bid"]) / 1_000_000 for b in resp.json().get("bids", [])}
+
     # ---- Performance API: mutating (confirm-gated, endpoints UNVERIFIED) ----
 
     def start_campaign(self, campaign_id: int, confirm: str | None = None):
@@ -299,6 +325,27 @@ class OzonClient:
             )
         return self._request(
             self._perf_headers(), "PATCH", PERF_BASE, f"/api/client/campaign/{campaign_id}", json=body
+        ).json()
+
+    def update_product_bids(self, campaign_id: int, bids: dict, confirm: str | None = None):
+        """PUT /api/client/campaign/{id}/products -- path/schema taken from
+        github.com/PCDCK/ozon-mcp perf_swagger.json (OpenAPI spec extracted
+        from Ozon Performance API, same source already used for
+        update_campaign_budget), cross-checked against the live GET
+        .../v2/products response on 2026-08-09 (same "bid" field, same
+        millionths-of-a-ruble unit, x-code-sample in the spec matches).
+        NOT yet confirmed by an actual PUT call. `bids`: {sku: rubles}.
+        WARNING: per the spec this PUT is a full replace of the campaign's
+        bid list (also wipes any phrase/stop-word data if present) -- pass
+        every SKU you want to keep an active bid for, not just the ones
+        you're changing."""
+        _check_confirm(confirm, f"update product bids for campaign {campaign_id} ({len(bids)} SKUs)")
+        body = {"bids": [
+            {"sku": str(sku), "bid": str(int(round(rub * 1_000_000)))}
+            for sku, rub in bids.items()
+        ]}
+        return self._request(
+            self._perf_headers(), "PUT", PERF_BASE, f"/api/client/campaign/{campaign_id}/products", json=body
         ).json()
 
 
@@ -356,6 +403,7 @@ def demo():
         (c.pause_campaign, (123,)),
         (c.update_product_seo, (123,)),
         (c.update_campaign_budget, (123, 500)),
+        (c.update_product_bids, (123, {456: 5.0})),
     ]:
         try:
             fn(*args)

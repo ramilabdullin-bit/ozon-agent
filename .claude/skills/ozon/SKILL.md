@@ -14,6 +14,12 @@ flow, confirmed CSV quirks, and which endpoints are unverified.
 
 - Ads/SEO analytics, campaign recommendations, card text → delegate to the
   `ozon-search` subagent (`.claude/agents/ozon-search.md`).
+- Bid-gap / competitor analysis for a specific campaign → `competitor_analysis.py
+  <campaign_id> [mpstats_category_path]` (uses `fetch_competitive_bids` — Ozon's
+  own signal — plus optional MPSTATS category context). See CLAUDE.md for the
+  important caveat: a low bid relative to Ozon's "competitive" signal does NOT
+  mean the campaign is underperforming — cross-check actual ДРР from
+  `daily_report.py` before recommending a bid change.
 - Other planned blocks (продажи/маржа, отзывы, РРЦ, остатки/поставки,
   медиа-контент) → not implemented yet, same as the WB side of this
   roadmap. Say so rather than improvising.

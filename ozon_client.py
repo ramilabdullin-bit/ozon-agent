@@ -15,6 +15,7 @@ assume browser automation is fine here without checking further first.
 """
 import csv
 import io
+import json
 import sqlite3
 import time
 import zipfile
@@ -31,6 +32,25 @@ SELLER_BASE = "https://api-seller.ozon.ru"
 PERF_BASE = "https://api-performance.ozon.ru"
 
 CONFIRM_PHRASE = "подтверждаю"
+
+
+def build_rich_content_from_images(image_urls: list) -> str:
+    """Minimal rich-content JSON (attribute 11254): one full-width
+    raShowcase/roll image block per photo the product already has. Shape
+    confirmed live 2026-08-09 against offer_id R700041's existing rich
+    content (same widgetName/type/block/img keys) -- this only reuses the
+    product's own already-approved photos, no new design/upload involved,
+    so it's a safe minimal default when no custom JSON is supplied."""
+    return json.dumps({"content": [
+        {"widgetName": "raShowcase", "type": "roll", "blocks": [
+            {"imgLink": "", "img": {
+                "src": url, "srcMobile": url, "alt": "",
+                "position": "width_full", "positionMobile": "width_full",
+                "widthMobile": 1440, "heightMobile": 900,
+            }},
+        ]}
+        for url in image_urls
+    ]}, ensure_ascii=False)
 
 
 def load_env() -> dict:
@@ -138,6 +158,14 @@ class OzonClient:
             self.seller_session, "POST", SELLER_BASE, "/v4/product/info/attributes",
             json={"filter": {"product_id": product_ids}, "limit": len(product_ids)},
         ).json()["result"]
+        def _has_value(attr_list, attr_id):
+            # An attribute id can be present with an EMPTY values list --
+            # confirmed live 2026-08-09: clearing rich content by omitting
+            # it from a resubmitted attributes array doesn't remove the id,
+            # only empties its values (Ozon merges by id, doesn't delete on
+            # omission). Presence of the id alone is not enough.
+            return any(a["id"] == attr_id and a.get("values") for a in attr_list)
+
         out = []
         for item in items:
             # Video lives in complex_attributes (a grouped/repeatable
@@ -145,8 +173,8 @@ class OzonClient:
             # product_id 114225067 (sku 308215704, offer_id 00-00000863):
             # owner pointed out a card with video that the first version of
             # this check (attributes-only) missed entirely.
-            attr_ids = {a["id"] for a in item["attributes"]} | \
-                       {a["id"] for a in item.get("complex_attributes", [])}
+            complex_attrs = item.get("complex_attributes") or []
+            has_video = any(_has_value(complex_attrs, vid) for vid in self.VIDEO_ATTRIBUTE_IDS)
             out.append({
                 "product_id": item["id"],
                 "offer_id": item["offer_id"],
@@ -154,8 +182,8 @@ class OzonClient:
                 "name": item["name"],
                 "photos_count": len(item.get("images") or []),
                 "has_primary_image": bool(item.get("primary_image")),
-                "has_video": bool(attr_ids & self.VIDEO_ATTRIBUTE_IDS),
-                "has_rich_content": self.RICH_CONTENT_ATTRIBUTE_ID in attr_ids,
+                "has_video": has_video,
+                "has_rich_content": _has_value(item["attributes"], self.RICH_CONTENT_ATTRIBUTE_ID),
             })
         return out
 
@@ -216,6 +244,13 @@ class OzonClient:
             "weight": attrs_resp["weight"],
             "weight_unit": attrs_resp["weight_unit"],
             "attributes": attrs_resp["attributes"],
+            # Found 2026-08-09 while building video upload: this key was
+            # missing entirely -- since /v3/product/import is a full
+            # replace, any update_product_seo call on a product that HAS
+            # video/complex attributes would have silently wiped them
+            # (never hit in practice, the only product tested on so far
+            # had none). Must round-trip this alongside attributes.
+            "complex_attributes": attrs_resp.get("complex_attributes", []),
             "price": str(price_resp["price"]),
             "old_price": str(price_resp["old_price"]),
             "currency_code": price_resp["currency_code"],
@@ -239,6 +274,83 @@ class OzonClient:
                 if attr["id"] == self.DESCRIPTION_ATTRIBUTE_ID:
                     attr["values"][0]["value"] = description
                     break
+        resp = self._request(
+            self.seller_session, "POST", SELLER_BASE, "/v3/product/import",
+            json={"items": [item]},
+        )
+        return resp.json()["result"]
+
+    RICH_CONTENT_ATTRIBUTE_ID = 11254
+
+    def update_product_rich_content(self, product_id: int, rich_content_json: str | None = None,
+                                     confirm: str | None = None):
+        """Same full-snapshot-then-patch pattern as update_product_seo --
+        rich content (attribute 11254) is a plain string attribute holding
+        a JSON blob, not a separate endpoint. If rich_content_json is not
+        given, auto-builds one from the product's own current photos via
+        build_rich_content_from_images (full-width image blocks, template
+        confirmed live 2026-08-09 from offer_id R700041's existing rich
+        content -- same widget/block shape, just our own images instead of
+        theirs)."""
+        _check_confirm(confirm, f"update product rich content for product_id {product_id}")
+        item = self._fetch_full_product_snapshot(product_id)
+        if rich_content_json is None:
+            rich_content_json = build_rich_content_from_images(item["images"])
+        found = False
+        for attr in item["attributes"]:
+            if attr["id"] == self.RICH_CONTENT_ATTRIBUTE_ID:
+                attr["values"][0]["value"] = rich_content_json
+                found = True
+                break
+        if not found:
+            item["attributes"].append({
+                "id": self.RICH_CONTENT_ATTRIBUTE_ID, "complex_id": 0,
+                "values": [{"dictionary_value_id": 0, "value": rich_content_json}],
+            })
+        resp = self._request(
+            self.seller_session, "POST", SELLER_BASE, "/v3/product/import",
+            json={"items": [item]},
+        )
+        return resp.json()["result"]
+
+    # Video is split into two independent complex-attribute groups
+    # (confirmed live 2026-08-09 via /v1/description-category/attribute):
+    # 100001 = "Озон.Видео" (title 21837, link 21841, shown-SKUs 22273,
+    # 8s-5min/2GB), 100002 = "Озон.Видеообложка" (cover link 21845 alone,
+    # 8-30s/20MB). Both take a URL string -- Ozon re-hosts it on their own
+    # CDN (v-1.ozone.ru) after ingestion, confirmed by inspecting an
+    # existing filled product (sku 308215704, owner-provided example).
+    VIDEO_GROUP_ID = 100001
+    VIDEO_COVER_GROUP_ID = 100002
+
+    def update_product_video(self, product_id: int, video_url: str | None = None,
+                              title: str | None = None, shown_skus: str | None = None,
+                              cover_url: str | None = None, confirm: str | None = None):
+        """Full-snapshot-then-patch, same pattern as update_product_seo/
+        update_product_rich_content. Replaces the video/video-cover complex
+        attribute groups, leaves everything else (including any other
+        complex attribute untouched -- filtered out by complex_id, not
+        wiped). Pass video_url and/or cover_url; title/shown_skus only
+        apply to the video_url group."""
+        if video_url is None and cover_url is None:
+            raise ValueError("need at least one of video_url or cover_url")
+        _check_confirm(confirm, f"update product video for product_id {product_id}")
+        item = self._fetch_full_product_snapshot(product_id)
+        kept = [a for a in item["complex_attributes"]
+                if a.get("complex_id") not in (self.VIDEO_GROUP_ID, self.VIDEO_COVER_GROUP_ID)]
+        if video_url is not None:
+            kept.append({"id": 21841, "complex_id": self.VIDEO_GROUP_ID,
+                         "values": [{"dictionary_value_id": 0, "value": video_url}]})
+            if title:
+                kept.append({"id": 21837, "complex_id": self.VIDEO_GROUP_ID,
+                             "values": [{"dictionary_value_id": 0, "value": title}]})
+            if shown_skus:
+                kept.append({"id": 22273, "complex_id": self.VIDEO_GROUP_ID,
+                             "values": [{"dictionary_value_id": 0, "value": shown_skus}]})
+        if cover_url is not None:
+            kept.append({"id": 21845, "complex_id": self.VIDEO_COVER_GROUP_ID,
+                         "values": [{"dictionary_value_id": 0, "value": cover_url}]})
+        item["complex_attributes"] = kept
         resp = self._request(
             self.seller_session, "POST", SELLER_BASE, "/v3/product/import",
             json={"items": [item]},
@@ -430,11 +542,10 @@ def init_db(conn: sqlite3.Connection):
 
 
 def store_campaign_stats(conn: sqlite3.Connection, stats: dict):
-    import json as _json
     today = date.today().isoformat()
     conn.executemany(
         "INSERT OR REPLACE INTO campaign_stats (snapshot_date, campaign_id, row_json) VALUES (?, ?, ?)",
-        [(today, cid, _json.dumps(rows, ensure_ascii=False)) for cid, rows in stats.items()],
+        [(today, cid, json.dumps(rows, ensure_ascii=False)) for cid, rows in stats.items()],
     )
     conn.commit()
 
@@ -472,13 +583,20 @@ def demo():
         (c.update_product_seo, (123,)),
         (c.update_campaign_budget, (123, 500)),
         (c.update_product_bids, (123, {456: 5.0})),
+        (c.update_product_rich_content, (123,)),
+        (c.update_product_video, (123, "https://example.com/v.mp4")),
     ]:
         try:
             fn(*args)
             raise AssertionError(f"{fn.__name__} did not raise ConfirmationRequired")
         except ConfirmationRequired:
             pass
-    print("demo: confirm-gate self-check passed")
+
+    rc = json.loads(build_rich_content_from_images(["https://a/1.jpg", "https://a/2.jpg"]))
+    assert len(rc["content"]) == 2, "one block per image"
+    assert rc["content"][0]["blocks"][0]["img"]["src"] == "https://a/1.jpg"
+
+    print("demo: confirm-gate + rich-content builder self-check passed")
 
 
 if __name__ == "__main__":

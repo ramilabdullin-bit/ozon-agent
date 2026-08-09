@@ -140,7 +140,13 @@ class OzonClient:
         ).json()["result"]
         out = []
         for item in items:
-            attr_ids = {a["id"] for a in item["attributes"]}
+            # Video lives in complex_attributes (a grouped/repeatable
+            # sub-list), NOT attributes -- confirmed live 2026-08-09 on
+            # product_id 114225067 (sku 308215704, offer_id 00-00000863):
+            # owner pointed out a card with video that the first version of
+            # this check (attributes-only) missed entirely.
+            attr_ids = {a["id"] for a in item["attributes"]} | \
+                       {a["id"] for a in item.get("complex_attributes", [])}
             out.append({
                 "product_id": item["id"],
                 "offer_id": item["offer_id"],

@@ -112,6 +112,47 @@ class OzonClient:
         )
         return resp.json()["result"]
 
+    # Video is spread across several attributes, none required together
+    # (confirmed live 2026-08-09 via /v1/description-category/attribute):
+    # 21837 title, 21845 cover link, 21841 video link, 22273 SKUs shown.
+    VIDEO_ATTRIBUTE_IDS = {21837, 21841, 21845, 22273}
+    RICH_CONTENT_ATTRIBUTE_ID = 11254  # confirmed live 2026-08-09, same source
+
+    def fetch_all_products_content(self) -> list:
+        """Content audit data (images/video/rich-content presence) for
+        every product in the cabinet. One products/list pagination pass
+        (158 products fit Seller API's soft limits fine, confirmed live --
+        no batching needed) + a single /v4/product/info/attributes call
+        for all product_ids at once (also confirmed to accept 158 ids in
+        one request)."""
+        product_ids, last_id = [], ""
+        while True:
+            page = self.fetch_products(limit=100, last_id=last_id)
+            product_ids += [str(p["product_id"]) for p in page["items"]]
+            if len(page["items"]) < 100:
+                break
+            last_id = page["last_id"]
+        if not product_ids:
+            return []
+        items = self._request(
+            self.seller_session, "POST", SELLER_BASE, "/v4/product/info/attributes",
+            json={"filter": {"product_id": product_ids}, "limit": len(product_ids)},
+        ).json()["result"]
+        out = []
+        for item in items:
+            attr_ids = {a["id"] for a in item["attributes"]}
+            out.append({
+                "product_id": item["id"],
+                "offer_id": item["offer_id"],
+                "sku": item.get("sku"),
+                "name": item["name"],
+                "photos_count": len(item.get("images") or []),
+                "has_primary_image": bool(item.get("primary_image")),
+                "has_video": bool(attr_ids & self.VIDEO_ATTRIBUTE_IDS),
+                "has_rich_content": self.RICH_CONTENT_ATTRIBUTE_ID in attr_ids,
+            })
+        return out
+
     BRAND_ATTRIBUTE_ID = 85  # confirmed live 2026-08-09 on product_id 51483692 -> "INKI"
 
     def fetch_own_brand(self) -> str | None:

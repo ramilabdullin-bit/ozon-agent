@@ -1,6 +1,6 @@
 ---
 name: ozon
-description: Entry point for the Ozon seller-cabinet agent (/root/ozon-agent). Use when asked about Ozon campaigns, card SEO, or "как там озон" for this cabinet. Currently covers one block (ozon-search: ads + SEO analytics/recommendations) — other blocks (sales/margin, reviews, price/RRP monitoring, stock/fulfillment, media content) are planned but not built yet, same roadmap as wb-agent (currently paused).
+description: Entry point for the Ozon seller-cabinet agent (/root/ozon-agent). Use when asked about Ozon campaigns, card SEO, or "как там озон" for this cabinet. Covers ozon-search (ads + SEO analytics/recommendations) and a read-only media-content audit (content_audit.py: photos/video/rich-content gaps per card) — other blocks (sales/margin, reviews, price/RRP monitoring, stock/fulfillment) are planned but not built yet, same roadmap as wb-agent (currently paused).
 ---
 
 # ozon — Ozon cabinet agent entry point
@@ -28,9 +28,14 @@ flow, confirmed CSV quirks, and which endpoints are unverified.
   tool also flags outside sellers reselling our OWN brand (a real
   competitive threat) via a hardcoded `OWN_SELLER_IDS` set that only the
   owner can confirm/update — see CLAUDE.md.
-- Other planned blocks (продажи/маржа, отзывы, РРЦ, остатки/поставки,
-  медиа-контент) → not implemented yet, same as the WB side of this
-  roadmap. Say so rather than improvising.
+- Media-content gaps (missing photos/video/rich-content per card) →
+  `content_audit.py` (read-only, no confirm needed — flags only, does not
+  upload anything). See CLAUDE.md for the attribute-id mapping (video and
+  rich-content are regular attributes, not response fields) and the
+  2026-08-09 finding (0/158 cards have video).
+- Other planned blocks (продажи/маржа, отзывы, РРЦ, остатки/поставки) →
+  not implemented yet, same as the WB side of this roadmap. Say so rather
+  than improvising.
 
 ## Ground rules
 

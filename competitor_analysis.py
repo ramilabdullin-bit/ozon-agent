@@ -17,6 +17,12 @@ Note: MPSTATS indexes by sales volume, so this only works for brands/SKUs
 with real sales history -- confirmed live 2026-08-09 that a near-zero-sales
 SKU looked up individually returns "SKU не найден", but the same cabinet's
 brand (aggregated across all its SKUs) was indexed fine.
+
+Price metric: ozon_card_price (Ozon Card checkout price), sales-weighted
+per brand/seller -- not MPSTATS' "avg_price" (unweighted, includes unsold
+catalog clutter) and not final_price either, since ~80% of Ozon buyers see
+the Ozon Card ("green") price as the primary price as of April 2026 (owner
+decision 2026-08-09 after checking Ozon's own pricing-display changes).
 """
 import json
 import subprocess
@@ -99,18 +105,53 @@ def niche_competitor_brands(niche_path: str, our_brand: str, limit: int = TOP_CO
     return ours, competitors
 
 
-def brand_reseller_competitors(brand: str) -> list:
+def brand_products(brand: str, limit: int = 300) -> list:
+    """Per-item rows for `brand` (sorted by revenue desc, per ozon-brand.sh),
+    including per-seller_id and ozon_card_price -- the aggregate brand/niche/
+    category endpoints don't expose ozon_card_price at all, so this is the
+    only way to get it. limit=300 covers INKI's full 278-item catalog in one
+    call (confirmed live 2026-08-09)."""
+    d1, d2 = _mpstats_dates()
+    data = _run_mpstats(MPSTATS_BRAND_SH, brand, "products", d1, d2, str(limit))
+    return data.get("data", data) if isinstance(data, dict) else data
+
+
+def weighted_card_price(items: list, seller_ids: set | None = None) -> tuple:
+    """Sales-weighted average ozon_card_price -- the price ~80% of Ozon
+    buyers actually see and pay as of April 2026 (Ozon Card discount is
+    on by default for most users, shown as the dominant "green" price;
+    the plain final_price is often not even shown to them). Optionally
+    restricted to a subset of seller_ids (e.g. only our own cabinets,
+    or only one reseller) out of a brand-wide product list."""
+    total_sales = 0
+    weighted_sum = 0.0
+    for item in items:
+        if seller_ids is not None and item.get("seller_id") not in seller_ids:
+            continue
+        sales = item.get("sales") or 0
+        price = item.get("ozon_card_price")
+        if sales and price:
+            total_sales += sales
+            weighted_sum += sales * price
+    return (weighted_sum / total_sales, total_sales) if total_sales else (None, 0)
+
+
+def brand_reseller_competitors(brand: str, our_items: list) -> list:
     """Other Ozon sellers with real sales of OUR OWN branded goods --
     excludes OWN_SELLER_IDS (our cabinets) and zero-sales noise rows (MPSTATS
     lists many sellers per brand with 0 sales -- listings/duplicates, not
     real market presence). What's left is a genuine competitive threat: a
     third party riding on our brand's demand, potentially undercutting our
-    price. Sorted by revenue desc so the dominant one surfaces first."""
+    price. Sorted by revenue desc so the dominant one surfaces first.
+    `our_items` is the brand_products(brand) result, reused here (grouped by
+    seller_id) to avoid a second brand-wide API call."""
     d1, d2 = _mpstats_dates()
     sellers = _run_mpstats(MPSTATS_BRAND_SH, brand, "sellers", d1, d2)
     rows = sellers.get("data", sellers) if isinstance(sellers, dict) else sellers
     rows = [r for r in rows if r.get("sales") and r.get("id") not in OWN_SELLER_IDS]
     rows.sort(key=lambda r: r.get("revenue", 0), reverse=True)
+    for r in rows:
+        r["card_price"], _ = weighted_card_price(our_items, seller_ids={r["id"]})
     return rows
 
 
@@ -146,43 +187,43 @@ def print_report(campaign_id: int, run_mpstats: bool = True):
             return
         niche = our_primary_niche(brand)
         ours, competitors = niche_competitor_brands(niche["name"], brand)
+        our_items = brand_products(brand)
+        our_price, our_card_sales = weighted_card_price(our_items, seller_ids=OWN_SELLER_IDS)
     except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print(f"\nMPSTATS: не удалось получить данные конкурентов ({e}).")
         return
 
-    # NOTE: MPSTATS "avg_price" is a flat average across every listed SKU,
-    # including ones with zero sales -- for INKI that's 4345 rubles, vastly
-    # above the realized selling price (confirmed live 2026-08-09, see
-    # CLAUDE.md). revenue/sales is the sales-weighted realized price and is
-    # what's used below for the cross-brand comparison; "avg_price" is not
-    # used for anything decision-relevant here.
-    def realized_price(row):
-        sales = row.get("sales") or 0
-        return row["revenue"] / sales if sales else None
-
-    print(f'\n=== MPSTATS: наш бренд "{brand}" в нише «{niche["name"]}» ===')
-    our_price = realized_price(ours) if ours else None
-    if ours:
-        print(f'  Наши продажи={ours.get("sales")}  выручка={ours.get("revenue")}₽  '
-              f'цена факт. продаж={our_price:.0f}₽  рейтинг={ours.get("rating")}')
+    # Price metric: ozon_card_price, sales-weighted (weighted_card_price), not
+    # MPSTATS' "avg_price" (flat average across every listed SKU including
+    # zero-sales ones -- for INKI that's 4345 rubles vs the ~700-800 rubles
+    # actually paid) and not final_price either -- confirmed live 2026-08-09
+    # that ~80% of Ozon buyers see the Ozon Card ("green") price as the
+    # primary/only price since April 2026, see CLAUDE.md.
+    print(f'\n=== MPSTATS: наш бренд "{brand}" в нише «{niche["name"]}» (цена Ozon Карты) ===')
+    if our_price:
+        print(f'  Наши продажи (по Ozon Карте)={our_card_sales}  '
+              f'цена по Ozon Карте={our_price:.0f}₽  рейтинг={ours.get("rating") if ours else "н/д"}')
     else:
-        print(f'  "{brand}" не входит в топ брендов этой ниши по выручке за период (проверь другие ниши бренда).')
+        print(f'  Не удалось посчитать цену по Ozon Карте для "{brand}" (нет продаж с этим полем за период).')
 
     print(f"\n  Реальные конкуренты (топ {len(competitors)} брендов по выручке в этой нише,")
-    print("  цена — не каталожная avg_price MPSTATS, а revenue/sales, чтобы не искажалась")
-    print("  непроданными дорогими позициями в каталоге):")
+    print("  цена — ozon_card_price, взвешенная по продажам, по-товарный пул для каждого бренда):")
     for c in competitors:
-        c_price = realized_price(c)
+        try:
+            c_items = brand_products(c["name"])
+            c_price, c_sales = weighted_card_price(c_items)
+        except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            c_price, c_sales = None, 0
         price_delta = ""
         if our_price and c_price:
             diff_pct = (our_price / c_price - 1) * 100
-            price_delta = f'  (наша цена {diff_pct:+.0f}% к их факт. цене)'
+            price_delta = f'  (наша цена {diff_pct:+.0f}% к их цене по Ozon Карте)'
         c_price_str = f"{c_price:.0f}₽" if c_price else "н/д"
         print(f'  {c["name"]:<20} продажи={c.get("sales"):<7} выручка={c.get("revenue"):<10}₽  '
-              f'цена факт. продаж={c_price_str:>8}  рейтинг={c.get("rating")}{price_delta}')
+              f'цена по Ozon Карте={c_price_str:>8}  рейтинг={c.get("rating")}{price_delta}')
 
     try:
-        resellers = brand_reseller_competitors(brand)
+        resellers = brand_reseller_competitors(brand, our_items)
     except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print(f"\nMPSTATS: не удалось получить продавцов бренда ({e}).")
         return
@@ -190,10 +231,9 @@ def print_report(campaign_id: int, run_mpstats: bool = True):
     if not resellers:
         print("  Не найдено -- бренд продают только наши кабинеты.")
     for r in resellers:
-        r_price = realized_price(r)
-        r_price_str = f"{r_price:.0f}₽" if r_price else "н/д"
+        r_price_str = f'{r["card_price"]:.0f}₽' if r.get("card_price") else "н/д"
         print(f'  id={r["id"]:<10} {r["name"]:<20} продажи={r.get("sales"):<7} '
-              f'выручка={r.get("revenue"):<10}₽  цена факт. продаж={r_price_str}  '
+              f'выручка={r.get("revenue"):<10}₽  цена по Ozon Карте={r_price_str}  '
               "<-- РЕАЛЬНЫЙ КОНКУРЕНТ (перепродаёт наш бренд)")
 
 
@@ -228,6 +268,14 @@ def demo():
     assert all(c["name"] != "Бренд не указан" for c in competitors), "unbranded aggregate row must be excluded"
     assert competitors[0]["name"] == "Rival", "competitors should be sorted by revenue desc"
 
+    fake_items = [
+        {"seller_id": 76973, "sales": 10, "ozon_card_price": 100},  # ours
+        {"seller_id": 76973, "sales": 0, "ozon_card_price": 99999},  # zero sales -- must not skew the weighted price
+        {"seller_id": 307611, "sales": 5, "ozon_card_price": 90},  # reseller
+    ]
+    price, sales = weighted_card_price(fake_items, seller_ids={76973})
+    assert price == 100 and sales == 10, "zero-sales rows must not affect the sales-weighted price"
+
     fake_sellers = {"data": [
         {"id": 76973, "name": "наш кабинет 1", "sales": 100, "revenue": 1000},
         {"id": 999, "name": "чужой ноль продаж", "sales": 0, "revenue": 0},
@@ -235,9 +283,10 @@ def demo():
     ]}
     with mock.patch.object(sys.modules[__name__], "_run_mpstats", return_value=fake_sellers), \
          mock.patch.object(sys.modules[__name__], "OWN_SELLER_IDS", {76973}):
-        resellers = brand_reseller_competitors("US")
+        resellers = brand_reseller_competitors("US", fake_items)
     assert [r["id"] for r in resellers] == [307611], "own cabinet and zero-sales noise must be excluded"
-    print("demo: bid-gap + competitor-brand + brand-reseller self-check passed")
+    assert resellers[0]["card_price"] == 90, "reseller's own ozon_card_price should be sliced from our_items by seller_id"
+    print("demo: bid-gap + competitor-brand + brand-reseller + card-price self-check passed")
 
 
 if __name__ == "__main__":

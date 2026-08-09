@@ -21,9 +21,11 @@ flow, confirmed CSV quirks, and which endpoints are unverified.
   See CLAUDE.md for two important caveats: (1) a low bid relative to Ozon's
   "competitive" signal does NOT mean the campaign is underperforming —
   cross-check actual ДРР from `daily_report.py` before recommending a bid
-  change; (2) MPSTATS' `avg_price` field is catalog-wide (includes unsold
-  SKUs), the script uses `revenue/sales` instead for price comparisons;
-  (3) the tool also flags outside sellers reselling our OWN brand (a real
+  change; (2) price comparisons use `ozon_card_price` (Ozon Card checkout
+  price), sales-weighted per-item — not MPSTATS' `avg_price` (unweighted,
+  catalog-wide) and not `final_price` either, since ~80% of Ozon buyers see
+  the Ozon Card price as the primary/only price as of April 2026; (3) the
+  tool also flags outside sellers reselling our OWN brand (a real
   competitive threat) via a hardcoded `OWN_SELLER_IDS` set that only the
   owner can confirm/update — see CLAUDE.md.
 - Other planned blocks (продажи/маржа, отзывы, РРЦ, остатки/поставки,

@@ -23,8 +23,9 @@ flow, confirmed CSV quirks, and which endpoints are unverified.
 - Every mutating call goes through `_check_confirm()` in `ozon_client.py`
   — never call a mutating method without the owner's literal "подтверждаю"
   for that specific action in the current message.
-  `start_campaign`/`pause_campaign`/`update_product_seo` are additionally
-  unverified against a live call — say so if asked to use them.
+  `start_campaign`/`pause_campaign`/`update_product_seo` are all verified
+  live (2026-08-09) — still require explicit per-call confirmation, just
+  not "unverified" anymore.
 - No browser automation — not confirmed safe under Ozon's terms (unlike
   WB, where it's confirmed forbidden; for Ozon it's just unconfirmed, see
   CLAUDE.md). Stick to the two APIs.

@@ -24,10 +24,12 @@ recommendations. Never invent numbers the report didn't produce.
 - Never run `start_campaign`/`pause_campaign`/`update_product_seo` with
   `--confirm` unless the owner's current message *itself* contains
   "подтверждаю" for that specific action, naming the specific campaign/
-  product ID. `start_campaign`/`pause_campaign` are verified live
-  (2026-08-09, campaign 27767900) and safe to use under that rule.
-  `update_product_seo` is still UNVERIFIED against a live call — flag that
-  explicitly if asked to use it, don't present it as proven.
+  product ID. All three are verified live now (2026-08-09: campaign
+  27767900 for start/pause; product 51483692 for SEO, tested and
+  reverted). `update_product_seo` always reads the full current product
+  state first and patches only the requested field on top (Ozon's import
+  endpoint is a full replace, not a patch — never bypass that with a
+  partial payload).
 - No browser automation for Ozon either. The two offer/penalty PDFs
   reviewed didn't contain WB's explicit ban, but that's "not found", not
   "confirmed allowed" — don't treat it as cleared without checking further

@@ -272,6 +272,35 @@ class OzonClient:
             self._perf_headers(), "POST", PERF_BASE, f"/api/client/campaign/{campaign_id}/deactivate"
         ).json()
 
+    def update_campaign_budget(self, campaign_id: int, rubles: float, confirm: str | None = None):
+        """PATCH /api/client/campaign/{campaignId} -- confirmed live
+        2026-08-09 (campaign 27767900: 10000 -> 10001 -> reverted to 10000
+        RUB, verified via fetch_campaigns() after each step). Amount unit
+        is millionths of a ruble (1_000_000 = 1 RUB). Budget type (daily vs
+        weekly) is fixed at campaign creation and can't be switched, so
+        this reads the campaign's current budgetType first and sends
+        whichever field applies."""
+        _check_confirm(confirm, f"update budget for campaign {campaign_id}")
+        campaign = next(
+            (c for c in self.fetch_campaigns() if str(c["id"]) == str(campaign_id)), None
+        )
+        if campaign is None:
+            raise ValueError(f"campaign {campaign_id} not found")
+        budget_type = campaign.get("budgetType")
+        micro = str(int(round(rubles * 1_000_000)))
+        if budget_type == "PRODUCT_CAMPAIGN_BUDGET_TYPE_DAILY":
+            body = {"dailyBudget": micro}
+        elif budget_type == "PRODUCT_CAMPAIGN_BUDGET_TYPE_WEEKLY":
+            body = {"weeklyBudget": micro}
+        else:
+            raise ValueError(
+                f"campaign {campaign_id} has no budget type set (budgetType={budget_type}) "
+                "-- can't tell whether to send dailyBudget or weeklyBudget"
+            )
+        return self._request(
+            self._perf_headers(), "PATCH", PERF_BASE, f"/api/client/campaign/{campaign_id}", json=body
+        ).json()
+
 
 def init_db(conn: sqlite3.Connection):
     conn.execute("""
@@ -326,6 +355,7 @@ def demo():
         (c.start_campaign, (123,)),
         (c.pause_campaign, (123,)),
         (c.update_product_seo, (123,)),
+        (c.update_campaign_budget, (123, 500)),
     ]:
         try:
             fn(*args)

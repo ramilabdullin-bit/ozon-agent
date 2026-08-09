@@ -29,8 +29,10 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 # ponytail: fixed thresholds, tune here if the report gets too noisy/quiet
-MIN_SPEND_TO_FLAG = 300.0   # ignore "no orders" flag below this daily spend
-HIGH_DRR_PCT = 15.0         # ad spend / revenue ratio considered high
+MIN_SPEND_TO_FLAG = 300.0        # ignore "no orders" flag below this daily spend
+HIGH_DRR_PCT = 15.0              # ad spend / revenue ratio considered high
+DAILY_BUDGET_WARN_PCT = 90.0     # day's spend this close to the campaign's daily budget cap
+WEEKLY_DAY_SPEND_WARN_PCT = 50.0  # one day already burned this much of the weekly budget
 
 
 def _num(v, cast=float):
@@ -72,6 +74,13 @@ def flag_row(totals: dict) -> list:
         flags.append("расход без заказов")
     if totals["drr"] is not None and totals["drr"] > HIGH_DRR_PCT:
         flags.append(f"высокий ДРР {totals['drr']}%")
+    daily_budget = totals.get("daily_budget") or 0
+    weekly_budget = totals.get("weekly_budget") or 0
+    if daily_budget and totals["spend"] >= daily_budget * DAILY_BUDGET_WARN_PCT / 100:
+        flags.append("упёрлась в дневной бюджет")
+    if weekly_budget and totals["spend"] >= weekly_budget * WEEKLY_DAY_SPEND_WARN_PCT / 100:
+        pct = round(totals["spend"] / weekly_budget * 100)
+        flags.append(f"за день потрачено {pct}% недельного бюджета")
     return flags
 
 
@@ -87,6 +96,8 @@ def build_data(client: OzonClient, day: date):
             continue
         totals["id"] = c["id"]
         totals["type"] = c.get("advObjectType", "")
+        totals["daily_budget"] = _num(c.get("dailyBudget")) / 1_000_000
+        totals["weekly_budget"] = _num(c.get("weeklyBudget")) / 1_000_000
         totals["flags"] = flag_row(totals)
         rows.append(totals)
     rows.sort(key=lambda r: -r["spend"])
@@ -102,6 +113,7 @@ def summarize(rows: list, total_campaigns: int, running_count: int) -> dict:
         idle=[r for r in rows if "простаивает" in r["flags"]],
         no_conv=[r for r in rows if "расход без заказов" in r["flags"]],
         high_drr=[r for r in rows if any(f.startswith("высокий ДРР") for f in r["flags"])],
+        budget_warn=[r for r in rows if any("бюджет" in f for f in r["flags"])],
         total_campaigns=total_campaigns,
         running_count=running_count,
     )
@@ -125,7 +137,9 @@ def build_telegram_text(day: date, s: dict) -> str:
         lines.append(f"⚠️ {len(s['high_drr'])} РК с высоким ДРР (>{HIGH_DRR_PCT:.0f}%)")
     if s["idle"]:
         lines.append(f"💤 {len(s['idle'])} активных РК без показов за день")
-    if not (s["no_conv"] or s["high_drr"] or s["idle"]):
+    if s["budget_warn"]:
+        lines.append(f"💰 {len(s['budget_warn'])} РК близко к пределу бюджета")
+    if not (s["no_conv"] or s["high_drr"] or s["idle"] or s["budget_warn"]):
         lines.append("Аномалий не найдено.")
     lines.append("\nПодробности — в приложенном PDF.")
     return "\n".join(lines)
@@ -164,6 +178,9 @@ def build_pdf(day: date, rows: list, s: dict, out_path: Path):
     for r in s["idle"][:10]:
         recs.append(f"- РК {r['id']} ({r['type']}): активна, но 0 показов за день — поднять ставку "
                      f"или приостановить.")
+    for r in s["budget_warn"]:
+        budget_flag = next(f for f in r["flags"] if "бюджет" in f)
+        recs.append(f"- РК {r['id']} ({r['type']}): {budget_flag} — проверить темп расхода.")
     if len(s["idle"]) > 10:
         recs.append(f"...и ещё {len(s['idle']) - 10} простаивающих РК (полный список — в таблице ниже).")
     if not recs:

@@ -45,9 +45,33 @@ def test_missing_totals_row_returns_none():
     assert normalize_totals([{"sku": "12345", "Показы": "10"}]) is None
 
 
+def test_daily_budget_near_cap_flagged():
+    totals = normalize_totals([SCHEMA_B_ACTIVE])
+    totals["daily_budget"] = 34760.22 / 0.95  # spend is ~95% of this budget
+    totals["weekly_budget"] = 0
+    assert "упёрлась в дневной бюджет" in flag_row(totals)
+
+
+def test_weekly_budget_fast_burn_flagged():
+    totals = normalize_totals([SCHEMA_A_NO_ORDERS])  # spend 500
+    totals["daily_budget"] = 0
+    totals["weekly_budget"] = 800  # 500 / 800 = 62.5% burned in a single day
+    flags = flag_row(totals)
+    assert any(f.startswith("за день потрачено") for f in flags)
+
+
+def test_no_budget_flag_when_budget_unset():
+    totals = normalize_totals([SCHEMA_B_ACTIVE])  # spend 34760.22, no budget fields set
+    flags = flag_row(totals)
+    assert not any("бюджет" in f for f in flags)
+
+
 if __name__ == "__main__":
     test_idle_flagged()
     test_active_sku_campaign_not_flagged_no_orders()
     test_spend_without_orders_flagged()
     test_missing_totals_row_returns_none()
+    test_daily_budget_near_cap_flagged()
+    test_weekly_budget_fast_burn_flagged()
+    test_no_budget_flag_when_budget_unset()
     print("test_daily_report: all passed")

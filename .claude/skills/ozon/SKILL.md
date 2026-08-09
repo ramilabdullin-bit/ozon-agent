@@ -22,7 +22,10 @@ flow, confirmed CSV quirks, and which endpoints are unverified.
   "competitive" signal does NOT mean the campaign is underperforming —
   cross-check actual ДРР from `daily_report.py` before recommending a bid
   change; (2) MPSTATS' `avg_price` field is catalog-wide (includes unsold
-  SKUs), the script uses `revenue/sales` instead for price comparisons.
+  SKUs), the script uses `revenue/sales` instead for price comparisons;
+  (3) the tool also flags outside sellers reselling our OWN brand (a real
+  competitive threat) via a hardcoded `OWN_SELLER_IDS` set that only the
+  owner can confirm/update — see CLAUDE.md.
 - Other planned blocks (продажи/маржа, отзывы, РРЦ, остатки/поставки,
   медиа-контент) → not implemented yet, same as the WB side of this
   roadmap. Say so rather than improvising.

@@ -31,6 +31,14 @@ MPSTATS_CATEGORY_SH = "/root/.claude/skills/mpstats/scripts/ozon/ozon-category.s
 UNDERBID_RATIO = 0.5  # our bid below this fraction of Ozon's competitive bid -> flag
 TOP_COMPETITORS = 8
 
+# MPSTATS seller ids (Ozon public storefront id, NOT the Seller API Client-Id
+# used for auth -- different id space) confirmed by the owner 2026-08-09 as
+# our own cabinets selling brand INKI: BEST GOODS (76973), "Официальный
+# представитель" (2017608), STORE for HOME (2728148). Anyone else selling
+# INKI with real sales is an outside reseller, not us -- update this set if
+# the owner opens/closes a cabinet.
+OWN_SELLER_IDS = {76973, 2017608, 2728148}
+
 
 def _mpstats_dates():
     # MPSTATS rejects d2 == today ("d2 должно быть датой до <today>").
@@ -89,6 +97,21 @@ def niche_competitor_brands(niche_path: str, our_brand: str, limit: int = TOP_CO
     ours = next((r for r in rows if r["name"].lower() == our_brand.lower()), None)
     competitors = [r for r in rows if r is not ours][:limit]
     return ours, competitors
+
+
+def brand_reseller_competitors(brand: str) -> list:
+    """Other Ozon sellers with real sales of OUR OWN branded goods --
+    excludes OWN_SELLER_IDS (our cabinets) and zero-sales noise rows (MPSTATS
+    lists many sellers per brand with 0 sales -- listings/duplicates, not
+    real market presence). What's left is a genuine competitive threat: a
+    third party riding on our brand's demand, potentially undercutting our
+    price. Sorted by revenue desc so the dominant one surfaces first."""
+    d1, d2 = _mpstats_dates()
+    sellers = _run_mpstats(MPSTATS_BRAND_SH, brand, "sellers", d1, d2)
+    rows = sellers.get("data", sellers) if isinstance(sellers, dict) else sellers
+    rows = [r for r in rows if r.get("sales") and r.get("id") not in OWN_SELLER_IDS]
+    rows.sort(key=lambda r: r.get("revenue", 0), reverse=True)
+    return rows
 
 
 def print_report(campaign_id: int, run_mpstats: bool = True):
@@ -158,6 +181,21 @@ def print_report(campaign_id: int, run_mpstats: bool = True):
         print(f'  {c["name"]:<20} продажи={c.get("sales"):<7} выручка={c.get("revenue"):<10}₽  '
               f'цена факт. продаж={c_price_str:>8}  рейтинг={c.get("rating")}{price_delta}')
 
+    try:
+        resellers = brand_reseller_competitors(brand)
+    except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        print(f"\nMPSTATS: не удалось получить продавцов бренда ({e}).")
+        return
+    print(f'\n=== MPSTATS: посторонние продавцы, торгующие нашим брендом "{brand}" ===')
+    if not resellers:
+        print("  Не найдено -- бренд продают только наши кабинеты.")
+    for r in resellers:
+        r_price = realized_price(r)
+        r_price_str = f"{r_price:.0f}₽" if r_price else "н/д"
+        print(f'  id={r["id"]:<10} {r["name"]:<20} продажи={r.get("sales"):<7} '
+              f'выручка={r.get("revenue"):<10}₽  цена факт. продаж={r_price_str}  '
+              "<-- РЕАЛЬНЫЙ КОНКУРЕНТ (перепродаёт наш бренд)")
+
 
 def demo():
     """Self-check: bid-gap math/underbid flag and competitor-brand filtering, no network."""
@@ -189,7 +227,17 @@ def demo():
     assert ours["name"] == "US", "should find our own brand case-insensitively"
     assert all(c["name"] != "Бренд не указан" for c in competitors), "unbranded aggregate row must be excluded"
     assert competitors[0]["name"] == "Rival", "competitors should be sorted by revenue desc"
-    print("demo: bid-gap + competitor-brand self-check passed")
+
+    fake_sellers = {"data": [
+        {"id": 76973, "name": "наш кабинет 1", "sales": 100, "revenue": 1000},
+        {"id": 999, "name": "чужой ноль продаж", "sales": 0, "revenue": 0},
+        {"id": 307611, "name": "BLScosmetics", "sales": 50, "revenue": 5000},
+    ]}
+    with mock.patch.object(sys.modules[__name__], "_run_mpstats", return_value=fake_sellers), \
+         mock.patch.object(sys.modules[__name__], "OWN_SELLER_IDS", {76973}):
+        resellers = brand_reseller_competitors("US")
+    assert [r["id"] for r in resellers] == [307611], "own cabinet and zero-sales noise must be excluded"
+    print("demo: bid-gap + competitor-brand + brand-reseller self-check passed")
 
 
 if __name__ == "__main__":

@@ -112,6 +112,27 @@ class OzonClient:
         )
         return resp.json()["result"]
 
+    BRAND_ATTRIBUTE_ID = 85  # confirmed live 2026-08-09 on product_id 51483692 -> "INKI"
+
+    def fetch_own_brand(self) -> str | None:
+        """Brand of the first product in the cabinet (attribute id 85).
+        Cheaper than _fetch_full_product_snapshot -- one products/list call
+        plus one attributes call, no prices. Read-only, used to auto-derive
+        the MPSTATS niche/brand for competitor analysis instead of hardcoding
+        a brand name that could go stale if the cabinet ever adds a second
+        one."""
+        products = self.fetch_products(limit=1)["items"]
+        if not products:
+            return None
+        resp = self._request(
+            self.seller_session, "POST", SELLER_BASE, "/v4/product/info/attributes",
+            json={"filter": {"product_id": [str(products[0]["product_id"])]}, "limit": 1},
+        ).json()["result"][0]
+        for attr in resp["attributes"]:
+            if attr["id"] == self.BRAND_ATTRIBUTE_ID:
+                return attr["values"][0]["value"]
+        return None
+
     # ---- Seller API: mutating (confirm-gated) ----
 
     DESCRIPTION_ATTRIBUTE_ID = 4191  # confirmed live 2026-08-09 -- description is

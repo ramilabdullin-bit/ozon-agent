@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Ad campaign competitor analysis: our CPC bids vs Ozon's own competitive-bid
-signal, plus optional MPSTATS category context (top sellers by sales) for the
-same niche.
+signal, plus real named competing brands (not just generic top products) in
+our own niche via MPSTATS.
 
 Usage:
-    python3 competitor_analysis.py <campaign_id> [mpstats_category_path]
+    python3 competitor_analysis.py <campaign_id> [--no-mpstats]
 
-Example:
-    python3 competitor_analysis.py 24098195 "Красота и здоровье/Уход за ногтями"
+The MPSTATS section auto-detects our niche: reads our brand from the Seller
+API (OzonClient.fetch_own_brand), asks MPSTATS which niche that brand earns
+the most revenue in (brand/niches), then lists the top brands by revenue in
+that exact niche (category/brands) -- these are the real competitors, not a
+generic "top products in a loosely-matched category" list. No manual
+category-path guessing needed.
 
-If the category path is omitted, only the Ozon bid-gap section runs (no
-MPSTATS calls). Look up the exact path with mpstats' own
-scripts/ozon/ozon-categories-list.sh if unsure -- category strings must
-match mpstats' tree exactly, there's no fuzzy matching here.
+Note: MPSTATS indexes by sales volume, so this only works for brands/SKUs
+with real sales history -- confirmed live 2026-08-09 that a near-zero-sales
+SKU looked up individually returns "SKU не найден", but the same cabinet's
+brand (aggregated across all its SKUs) was indexed fine.
 """
 import json
 import subprocess
@@ -21,9 +25,25 @@ from datetime import date, timedelta
 
 from ozon_client import load_env, OzonClient
 
-BASE_DIR_MPSTATS = "/root/.claude/skills/mpstats/scripts/ozon/ozon-category.sh"
+MPSTATS_BRAND_SH = "/root/.claude/skills/mpstats/scripts/ozon/ozon-brand.sh"
+MPSTATS_CATEGORY_SH = "/root/.claude/skills/mpstats/scripts/ozon/ozon-category.sh"
 
 UNDERBID_RATIO = 0.5  # our bid below this fraction of Ozon's competitive bid -> flag
+TOP_COMPETITORS = 8
+
+
+def _mpstats_dates():
+    # MPSTATS rejects d2 == today ("d2 должно быть датой до <today>").
+    d2 = date.today() - timedelta(days=1)
+    return (d2 - timedelta(days=30)).isoformat(), d2.isoformat()
+
+
+def _run_mpstats(script: str, *args) -> object:
+    proc = subprocess.run([script, *args], capture_output=True, text=True, timeout=60)
+    data = json.loads(proc.stdout)
+    if isinstance(data, dict) and "message" in data and "data" not in data:
+        raise RuntimeError(f"mpstats error: {data['message']}")
+    return data
 
 
 def bid_gap_report(client: OzonClient, campaign_id: int) -> list:
@@ -47,22 +67,31 @@ def bid_gap_report(client: OzonClient, campaign_id: int) -> list:
     return rows
 
 
-def mpstats_category_context(category_path: str, limit: int = 10) -> list:
-    # MPSTATS rejects d2 == today ("d2 должно быть датой до <today>"), so the
-    # script's own "today" default doesn't work here -- pin to yesterday.
-    d2 = date.today() - timedelta(days=1)
-    d1 = d2 - timedelta(days=30)
-    proc = subprocess.run(
-        [BASE_DIR_MPSTATS, category_path, "products", d1.isoformat(), d2.isoformat(), str(limit)],
-        capture_output=True, text=True, timeout=60,
-    )
-    data = json.loads(proc.stdout)
-    if isinstance(data, dict) and "message" in data:
-        raise RuntimeError(f"mpstats error: {data['message']}")
-    return data.get("data", [])
+def our_primary_niche(brand: str) -> dict:
+    """The niche where `brand` earns the most revenue on Ozon, per MPSTATS."""
+    d1, d2 = _mpstats_dates()
+    niches = _run_mpstats(MPSTATS_BRAND_SH, brand, "niches", d1, d2)
+    if not niches:
+        raise RuntimeError(f'MPSTATS has no niche data for brand "{brand}" (no sales history indexed?)')
+    return max(niches, key=lambda n: n.get("revenue", 0))
 
 
-def print_report(campaign_id: int, category_path: str | None):
+def niche_competitor_brands(niche_path: str, our_brand: str, limit: int = TOP_COMPETITORS) -> tuple:
+    """Real named brands ranked by revenue within the exact niche, split into
+    our own row and the top competitors (brand-less "Бренд не указан" rows
+    excluded -- that's an aggregate of untracked/generic listings, not a
+    named competitor)."""
+    d1, d2 = _mpstats_dates()
+    brands = _run_mpstats(MPSTATS_CATEGORY_SH, niche_path, "brands", d1, d2, str(limit + 5))
+    rows = brands.get("data", brands) if isinstance(brands, dict) else brands
+    rows = [r for r in rows if r.get("name") and r["name"] != "Бренд не указан"]
+    rows.sort(key=lambda r: r.get("revenue", 0), reverse=True)
+    ours = next((r for r in rows if r["name"].lower() == our_brand.lower()), None)
+    competitors = [r for r in rows if r is not ours][:limit]
+    return ours, competitors
+
+
+def print_report(campaign_id: int, run_mpstats: bool = True):
     env = load_env()
     client = OzonClient(env["OZON_CLIENT_ID"], env["OZON_API_KEY"],
                          env["OZON_PERF_CLIENT_ID"], env["OZON_PERF_CLIENT_SECRET"])
@@ -84,23 +113,54 @@ def print_report(campaign_id: int, category_path: str | None):
         print("хорошо работать и на заниженном биде (см. фактический ДРР в daily_report.py")
         print("перед решением поднимать бид).")
 
-    if category_path:
-        print(f"\n=== MPSTATS: топ ниши «{category_path}» по продажам ===")
-        try:
-            top = mpstats_category_context(category_path)
-        except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-            print(f"Не удалось получить данные MPSTATS: {e}")
+    if not run_mpstats:
+        return
+
+    try:
+        brand = client.fetch_own_brand()
+        if not brand:
+            print("\nMPSTATS: не удалось определить наш бренд (пустой каталог?), пропуск.")
             return
-        if not top:
-            print("Пусто -- проверь точное название категории через ozon-categories-list.sh.")
-        for item in top[:10]:
-            price = item.get("final_price") or item.get("price")
-            print(f'  {item.get("name", "?")[:50]:<50}  цена={price}₽  '
-                  f'продано={item.get("sales")}  бренд={item.get("brand")}')
+        niche = our_primary_niche(brand)
+        ours, competitors = niche_competitor_brands(niche["name"], brand)
+    except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        print(f"\nMPSTATS: не удалось получить данные конкурентов ({e}).")
+        return
+
+    # NOTE: MPSTATS "avg_price" is a flat average across every listed SKU,
+    # including ones with zero sales -- for INKI that's 4345 rubles, vastly
+    # above the realized selling price (confirmed live 2026-08-09, see
+    # CLAUDE.md). revenue/sales is the sales-weighted realized price and is
+    # what's used below for the cross-brand comparison; "avg_price" is not
+    # used for anything decision-relevant here.
+    def realized_price(row):
+        sales = row.get("sales") or 0
+        return row["revenue"] / sales if sales else None
+
+    print(f'\n=== MPSTATS: наш бренд "{brand}" в нише «{niche["name"]}» ===')
+    our_price = realized_price(ours) if ours else None
+    if ours:
+        print(f'  Наши продажи={ours.get("sales")}  выручка={ours.get("revenue")}₽  '
+              f'цена факт. продаж={our_price:.0f}₽  рейтинг={ours.get("rating")}')
+    else:
+        print(f'  "{brand}" не входит в топ брендов этой ниши по выручке за период (проверь другие ниши бренда).')
+
+    print(f"\n  Реальные конкуренты (топ {len(competitors)} брендов по выручке в этой нише,")
+    print("  цена — не каталожная avg_price MPSTATS, а revenue/sales, чтобы не искажалась")
+    print("  непроданными дорогими позициями в каталоге):")
+    for c in competitors:
+        c_price = realized_price(c)
+        price_delta = ""
+        if our_price and c_price:
+            diff_pct = (our_price / c_price - 1) * 100
+            price_delta = f'  (наша цена {diff_pct:+.0f}% к их факт. цене)'
+        c_price_str = f"{c_price:.0f}₽" if c_price else "н/д"
+        print(f'  {c["name"]:<20} продажи={c.get("sales"):<7} выручка={c.get("revenue"):<10}₽  '
+              f'цена факт. продаж={c_price_str:>8}  рейтинг={c.get("rating")}{price_delta}')
 
 
 def demo():
-    """Self-check: bid-gap math and underbid flag logic, no network."""
+    """Self-check: bid-gap math/underbid flag and competitor-brand filtering, no network."""
     class FakeClient:
         def fetch_campaign_products(self, campaign_id):
             return [
@@ -114,13 +174,28 @@ def demo():
     rows = bid_gap_report(FakeClient(), 1)
     assert rows[0]["sku"] == "1" and rows[0]["underbid"], "low bid should be flagged and sorted first"
     assert not rows[1]["underbid"], "bid above threshold should not be flagged"
-    print("demo: bid-gap self-check passed")
+
+    fake_brands = {"data": [
+        {"name": "Бренд не указан", "revenue": 999999, "sales": 1000, "avg_price": 999},
+        {"name": "US", "revenue": 1000, "avg_price": 5000, "sales": 10, "rating": 4.5},  # avg_price way off realized price (1000/10=100) -- must not be used for the comparison
+        {"name": "Rival", "revenue": 500, "avg_price": 400, "sales": 50, "rating": 4.8},
+    ]}
+    import unittest.mock as mock
+    # patch by module object, not string name -- this file may run as
+    # "__main__" rather than "competitor_analysis", where the string form
+    # would silently patch a separate re-imported copy and do nothing
+    with mock.patch.object(sys.modules[__name__], "_run_mpstats", return_value=fake_brands):
+        ours, competitors = niche_competitor_brands("Fake/Niche", "US")
+    assert ours["name"] == "US", "should find our own brand case-insensitively"
+    assert all(c["name"] != "Бренд не указан" for c in competitors), "unbranded aggregate row must be excluded"
+    assert competitors[0]["name"] == "Rival", "competitors should be sorted by revenue desc"
+    print("demo: bid-gap + competitor-brand self-check passed")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "demo":
         demo()
     elif len(sys.argv) > 1:
-        print_report(int(sys.argv[1]), sys.argv[2] if len(sys.argv) > 2 else None)
+        print_report(int(sys.argv[1]), run_mpstats="--no-mpstats" not in sys.argv)
     else:
-        print("Usage: competitor_analysis.py <campaign_id> [mpstats_category_path] | demo")
+        print("Usage: competitor_analysis.py <campaign_id> [--no-mpstats] | demo")
